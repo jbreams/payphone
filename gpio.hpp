@@ -16,7 +16,9 @@ struct GpioFdHolder {
   GpioFdHolder() = default;
   explicit GpioFdHolder(int fd) : fd(fd) {}
 
-  GpioFdHolder(GpioFdHolder &&other) : fd(other.fd) {}
+  GpioFdHolder(GpioFdHolder &&other) : fd(other.fd) {
+    other.fd = -1;
+  }
 
   GpioFdHolder &operator=(GpioFdHolder &&other) {
     close();
@@ -44,8 +46,12 @@ struct GpioLineEventData {
 };
 
 struct GpioLineValues {
+  struct AllOn {};
+
   GpioLineValues() = default;
   explicit GpioLineValues(uint64_t values) : values(values) {}
+  explicit GpioLineValues(AllOn)
+      : values(std::numeric_limits<uint64_t>::max()) {}
 
   GpioLineValues(std::initializer_list<uint32_t> value_indexes) {
     for (auto &&idx : value_indexes) {
@@ -53,6 +59,12 @@ struct GpioLineValues {
     }
   }
 
+  friend bool operator==(const GpioLineValues &lhs, const GpioLineValues &rhs) {
+    return lhs.values == rhs.values;
+  }
+  friend bool operator!=(const GpioLineValues &lhs, const GpioLineValues &rhs) {
+    return lhs.values != rhs.values;
+  }
   uint64_t values = 0;
   bool test(int idx) const noexcept { return (values >> idx & 0x1); }
 
@@ -93,7 +105,7 @@ struct GpioLineAttribute {
       std::variant<GpioLineFlags, GpioLineValues, GpioDebouncePeriod>;
   template <typename T,
             std::enable_if_t<std::is_constructible_v<AttrValue, T>, int> = 0>
-  GpioLineAttribute(uint32_t idx, T value)
+  GpioLineAttribute(GpioLineValues idx, T value)
       : mask{idx}, attr(std::move(value)) {}
 
   GpioLineValues mask;
@@ -111,6 +123,7 @@ public:
   };
 
   struct LineInfo {
+    uint32_t idx;
     std::string name;
     std::string consumer;
     GpioLineFlags flags;
@@ -119,8 +132,13 @@ public:
 
   class LineEventSource {
   public:
+    LineEventSource() = default;
     int fd() const noexcept { return m_fd.fd; }
     std::vector<GpioLineEventData> read_events();
+
+    void update_line_config(LineConfig &&config);
+    GpioLineValues get_values(GpioLineValues mask);
+    void set_values(GpioLineValues values, GpioLineValues mask);
 
   protected:
     friend class GpioChip;
@@ -128,6 +146,8 @@ public:
         : m_fd(std::move(fd)), m_buffer_size(buffer_size) {}
 
   private:
+    template <typename... Args> int do_ioctl(int ctl, Args... args);
+
     GpioFdHolder m_fd;
     size_t m_buffer_size;
   };
@@ -141,22 +161,16 @@ public:
   LineInfo get_line_info(uint32_t idx, bool add_watch);
   void unwatch_line(uint32_t idx);
 
-  void update_line_config(LineConfig &&config);
-
-  GpioLineValues
-  get_line_values(std::optional<GpioLineValues> values = std::nullopt);
-  void set_line_values(GpioLineValues values,
-                       std::optional<GpioLineValues> mask = std::nullopt);
-
   LineEventSource make_line_event_source(std::vector<uint32_t> line_idxs,
                                          std::string consumer,
                                          LineConfig config,
                                          uint32_t event_buffer_size = 0);
 
 protected:
-private:
-  void line_config_to_ioctl(const LineConfig &in, gpio_v2_line_config *out);
+  static void line_config_to_ioctl(const LineConfig &in,
+                                   gpio_v2_line_config *out);
 
+private:
   template <typename... Args> int do_ioctl(int ctl, Args... args);
 
   GpioFdHolder m_fd;

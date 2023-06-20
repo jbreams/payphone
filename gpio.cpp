@@ -38,6 +38,15 @@ GpioChip::GpioChip(const std::filesystem::path &path) {
 
 GpioChip::~GpioChip() { ::close(m_fd); }
 
+template <typename... Args> int GpioChip::LineEventSource::do_ioctl(int ctl, Args... args) {
+  int rc = ::ioctl(fd(), ctl, args...);
+  if (rc == -1) {
+    int err = errno;
+    throw std::system_error(err, std::system_category());
+  }
+  return rc;
+}
+
 template <typename... Args> int GpioChip::do_ioctl(int ctl, Args... args) {
   int rc = ::ioctl(m_fd, ctl, args...);
   if (rc == -1) {
@@ -50,8 +59,10 @@ template <typename... Args> int GpioChip::do_ioctl(int ctl, Args... args) {
 void GpioChip::line_config_to_ioctl(const LineConfig &config,
                                     gpio_v2_line_config *ioctl_config) {
   ioctl_config->flags = config.flags.flags;
-  ioctl_config->num_attrs = std::min(
-      static_cast<size_t>(GPIO_V2_LINE_NUM_ATTRS_MAX), config.attrs.size());
+  if (config.attrs.size() > GPIO_V2_LINE_NUM_ATTRS_MAX) {
+    throw std::logic_error("Too many attributes for LineConfig");
+  }
+  ioctl_config->num_attrs = config.attrs.size();
   for (size_t idx = 0; idx < ioctl_config->num_attrs; ++idx) {
     auto &attr = config.attrs.at(idx);
     ioctl_config->attrs[idx].mask = attr.mask.values;
@@ -76,23 +87,23 @@ void GpioChip::line_config_to_ioctl(const LineConfig &config,
   }
 }
 
-void GpioChip::update_line_config(LineConfig &&config) {
+void GpioChip::LineEventSource::update_line_config(LineConfig &&config) {
   gpio_v2_line_config ioctl_config = {};
-  line_config_to_ioctl(config, &ioctl_config);
+  GpioChip::line_config_to_ioctl(config, &ioctl_config);
   do_ioctl(GPIO_V2_LINE_SET_CONFIG_IOCTL, &ioctl_config);
 }
 
-GpioLineValues GpioChip::get_line_values(std::optional<GpioLineValues> mask) {
+GpioLineValues GpioChip::LineEventSource::get_values(GpioLineValues mask) {
   gpio_v2_line_values ioctl_values = {};
-  ioctl_values.mask = mask.value_or(GpioLineValues(m_all_lines_mask)).values;
+  ioctl_values.mask = mask.values;
   do_ioctl(GPIO_V2_LINE_GET_VALUES_IOCTL, &ioctl_values);
   return GpioLineValues(ioctl_values.bits);
 }
 
-void GpioChip::set_line_values(GpioLineValues values,
-                               std::optional<GpioLineValues> mask) {
+void GpioChip::LineEventSource::set_values(GpioLineValues values,
+                               GpioLineValues mask) {
   gpio_v2_line_values ioctl_values = {};
-  ioctl_values.mask = mask.value_or(GpioLineValues(m_all_lines_mask)).values;
+  ioctl_values.mask = mask.values;
   ioctl_values.bits = values.values;
   do_ioctl(GPIO_V2_LINE_SET_VALUES_IOCTL, &ioctl_values);
 }
@@ -109,19 +120,20 @@ GpioChip::LineInfo GpioChip::get_line_info(uint32_t idx, bool add_watch) {
   ret.consumer = ioctl_info.consumer;
   ret.flags = {ioctl_info.flags};
 
+  GpioLineValues mask(idx);
   for (size_t attr_idx = 0; attr_idx < ioctl_info.num_attrs; ++attr_idx) {
     switch (ioctl_info.attrs[attr_idx].id) {
     case GPIO_V2_LINE_ATTR_ID_DEBOUNCE:
       ret.attrs.emplace_back(
-          idx, GpioDebouncePeriod{std::chrono::microseconds{
+              mask, GpioDebouncePeriod{std::chrono::microseconds{
                    ioctl_info.attrs[attr_idx].debounce_period_us}});
       break;
     case GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES:
-      ret.attrs.emplace_back(idx,
+      ret.attrs.emplace_back(mask,
                              GpioLineValues(ioctl_info.attrs[attr_idx].values));
       break;
     case GPIO_V2_LINE_ATTR_ID_FLAGS:
-      ret.attrs.emplace_back(idx,
+      ret.attrs.emplace_back(mask,
                              GpioLineFlags{ioctl_info.attrs[attr_idx].flags});
       break;
     }
@@ -154,8 +166,12 @@ GpioChip::make_line_event_source(std::vector<uint32_t> line_idxs,
 }
 
 std::vector<GpioLineEventData> GpioChip::LineEventSource::read_events() {
+  if (fd() == -1) {
+    return {};
+  }
+
   std::vector<gpio_v2_line_event> raw_buf;
-  raw_buf.resize(std::min(m_buffer_size, static_cast<size_t>(16)));
+  raw_buf.resize(m_buffer_size ? m_buffer_size : 16);
 
   auto read_res =
       ::read(fd(), raw_buf.data(), raw_buf.size() * sizeof(gpio_v2_line_event));
