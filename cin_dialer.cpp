@@ -2,6 +2,7 @@
 #include "dialer.hpp"
 
 #include <algorithm>
+#include <iostream>
 
 #include <unistd.h>
 
@@ -24,7 +25,7 @@ CinDialer::wait_for_event(std::optional<std::chrono::microseconds> timeout) {
     FD_ZERO(&fdset);
     FD_SET(m_interrupt_pipe[0], &fdset);
     FD_SET(fileno(stdin), &fdset);
-    struct timeval timeout_val;
+    struct timeval timeout_val = {};
     if (timeout) {
       timeout_val.tv_sec =
           std::chrono::duration_cast<std::chrono::seconds>(*timeout).count();
@@ -32,11 +33,11 @@ CinDialer::wait_for_event(std::optional<std::chrono::microseconds> timeout) {
           (*timeout - std::chrono::duration_cast<std::chrono::microseconds>(
                           std::chrono::seconds(timeout_val.tv_sec)))
               .count();
+      std::cerr << "timeout val: " << timeout_val.tv_sec << " "
+                << timeout_val.tv_usec << "\n";
     }
-    auto ret =
-        ::select(std::max(fileno(stdin), m_interrupt_pipe[0]) + 1, &fdset,
-                 nullptr, nullptr, timeout ? &timeout_val : nullptr);
-    if (ret == 0) {
+    if (::select(std::max(fileno(stdin), m_interrupt_pipe[0]) + 1, &fdset,
+                 nullptr, nullptr, timeout ? &timeout_val : nullptr) == 0) {
       return EventData(Event::WaitTimeout);
     }
     char ch = '\0';

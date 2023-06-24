@@ -1,5 +1,7 @@
 #include "yaml_persisted_obj.hpp"
 
+#include <iostream>
+
 namespace {
 bool yaml_hasUnread(const pj::ContainerNode *cn) {
   auto reader = reinterpret_cast<YamlReader *>(cn->data.data1);
@@ -28,7 +30,19 @@ Ret yaml_ReadScalar(const pj::ContainerNode *cn, const std::string &name) {
     return ret;
   }
 
+  auto &default_node = reader->default_node(cn);
+  if (const auto &&node = default_node[name]; node.IsDefined()) {
+    return node.as<Ret>();
+  }
   return Ret{};
+}
+
+template <typename Type>
+void yaml_WriteScalar(const pj::ContainerNode *cn, const std::string &name,
+                      Type val) {
+  auto reader = reinterpret_cast<YamlReader *>(cn->data.data1);
+  auto &top = reader->node(cn);
+  top[name] = val;
 }
 
 float yaml_readNumber(const pj::ContainerNode *cn, const std::string &name) {
@@ -55,14 +69,48 @@ pj::ContainerNode yaml_readContainer(const pj::ContainerNode *cn,
   if (name == reader->name(cn)) {
     return *cn;
   }
-  reader->nodes.push_back({name, yaml_ReadScalar<YAML::Node>(cn, name)});
+  reader->nodes.push_back({name,
+                           {yaml_ReadScalar<YAML::Node>(cn, name),
+                            reader->default_node(cn)[name]}});
   return reader->make_pj_container_node(reader->nodes.size() - 1);
 }
 
 pj::ContainerNode yaml_readArray(const pj::ContainerNode *cn,
                                  const std::string &name) {
   auto reader = reinterpret_cast<YamlReader *>(cn->data.data1);
-  reader->nodes.push_back({"", yaml_ReadScalar<YAML::Node>(cn, name)});
+  reader->nodes.push_back({"",
+                           {yaml_ReadScalar<YAML::Node>(cn, name),
+                            reader->default_node(cn)[name]}});
+  return reader->make_pj_container_node(reader->nodes.size() - 1);
+}
+
+void yaml_writeNumber(pj::ContainerNode *cn, const std::string &name,
+                      float num) {
+  yaml_WriteScalar(cn, name, num);
+}
+
+void yaml_writeBool(pj::ContainerNode *cn, const std::string &name, bool val) {
+  yaml_WriteScalar(cn, name, val);
+}
+
+void yaml_writeString(pj::ContainerNode *cn, const std::string &name,
+                      const std::string &value) {
+  yaml_WriteScalar(cn, name, value);
+}
+
+void yaml_writeStringVector(pj::ContainerNode *cn, const std::string &name,
+                            const pj::StringVector &value) {
+  yaml_WriteScalar(cn, name, value);
+}
+
+pj::ContainerNode yaml_writeNewContainer(pj::ContainerNode *cn,
+                                         const std::string &name) {
+  auto reader = reinterpret_cast<YamlReader *>(cn->data.data1);
+  auto &top = reader->node(cn);
+  YAML::Node new_node;
+  top[name] = new_node;
+  reader->nodes.push_back({"", {std::move(new_node), YAML::Node{}}});
+
   return reader->make_pj_container_node(reader->nodes.size() - 1);
 }
 
@@ -76,6 +124,12 @@ static struct pj::container_node_op yaml_ops = [] {
   ret.readStringVector = yaml_readStringVector;
   ret.readContainer = yaml_readContainer;
   ret.readArray = yaml_readArray;
+  ret.writeBool = yaml_writeBool;
+  ret.writeNumber = yaml_writeNumber;
+  ret.writeString = yaml_writeString;
+  ret.writeStringVector = yaml_writeStringVector;
+  ret.writeNewContainer = yaml_writeNewContainer;
+  ret.writeNewArray = yaml_writeNewContainer;
   return ret;
 }();
 } // namespace

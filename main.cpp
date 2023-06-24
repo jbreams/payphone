@@ -125,10 +125,31 @@ enum State {
   OnHook,
   DialTone,
   WaitingForNumber,
+  Dialing,
   WaitingForAnswer,
   InCall,
+  Hangup,
   CallError
 };
+
+template <typename T> YAML::Node get_defaults() {
+  YamlReader foo({}, "Defaults", {});
+  T obj{};
+  obj.writeObject(foo.get_pj_container_node());
+  return foo.nodes[0].second.first.begin()->second;
+}
+
+template <typename T>
+T read_config_object(YAML::Node config_node, std::string name) {
+  T obj;
+  if (config_node.IsDefined()) {
+    auto default_node = get_defaults<T>();
+    YamlReader reader(std::move(config_node), std::move(name),
+                      std::move(default_node));
+    obj.readObject(reader.get_pj_container_node());
+  }
+  return obj;
+}
 
 int main(int argc, char **argv) {
 
@@ -138,19 +159,19 @@ int main(int argc, char **argv) {
   ep.libCreate();
   ep.libInit(ep_config);
 
-  pj::TransportConfig tc;
-  tc.port = 5060;
+  auto tc = read_config_object<pj::TransportConfig>(
+      config_node["transportConfig"], "TransportConfig");
+  if (tc.port == 0) {
+    tc.port = 5060;
+  }
   ep.transportCreate(PJSIP_TRANSPORT_UDP, tc);
 
   ep.libStart();
 
   CinDialer dialer;
 
-  YamlReader account_config_reader(config_node["accountConfig"],
-                                   "AccountConfig");
-
-  pj::AccountConfig ac;
-  ac.readObject(account_config_reader.get_pj_container_node());
+  auto ac = read_config_object<pj::AccountConfig>(config_node["accountConfig"],
+                                                  "AccountConfig");
   auto account = std::make_unique<Account>(&dialer);
   account->create(ac, true);
 
@@ -208,12 +229,18 @@ int main(int argc, char **argv) {
   tg.startTransmit(playback);
   std::unique_ptr<Call> active_call;
 
+  auto server_address = [&] {
+    auto uri = account->getInfo().uri;
+    auto at_sign = uri.find('@');
+    return uri.substr(at_sign + 1);
+  }();
   for (;;) {
     switch (state) {
+    case State::Hangup:
+      active_call.reset();
+      tg.stop();
+      [[fallthrough]];
     case State::OnHook: {
-      if (active_call) {
-        active_call.reset();
-      }
       auto event = dialer.wait_for_event(std::nullopt);
       if (event.event != Dialer::Event::OffHook) {
         continue;
@@ -230,58 +257,43 @@ int main(int argc, char **argv) {
     case State::WaitingForNumber:
       [[fallthrough]];
     case State::DialTone: {
-      auto event = dialer.wait_for_event(std::chrono::seconds{5000});
+      auto event = dialer.wait_for_event(std::chrono::seconds{3});
       if (event.event == Dialer::Event::OnHook) {
-        tg.stop();
-        state = State::OnHook;
+        state = State::Hangup;
         continue;
       }
-      if (event.event != Dialer::Event::ButtonDown) {
-        continue;
-      }
-      push_digit(event.button);
-      bool ready_to_dial = false;
-      if (number_to_dial.size() == 4 && number_to_dial.front() == '6') {
-        std::stringstream ss;
-        auto &uri = ac.regConfig.registrarUri;
-        auto needle = uri.find("sip:");
 
-        ss << "sip:" << number_to_dial << "@"
-           << uri.substr(needle + std::char_traits<char>::length("sip:"));
-        number_to_dial = ss.str();
-        ready_to_dial = true;
+      if (event.event == Dialer::Event::ButtonDown) {
+        push_digit(event.button);
+      } else if (event.event == Dialer::Event::WaitTimeout &&
+                 !number_to_dial.empty()) {
+        state = State::Dialing;
+        continue;
       }
-      phonenumbers::PhoneNumber parsed_number;
-      phone_num_util->ParseAndKeepRawInput(number_to_dial, "US",
-                                           &parsed_number);
-      if (phone_num_util->IsPossibleNumber(parsed_number)) {
-        phone_num_util->Format(parsed_number,
-                               phonenumbers::PhoneNumberUtil::RFC3966,
-                               &number_to_dial);
-        ready_to_dial = true;
-      }
-      if (ready_to_dial) {
-        tg.stop();
-        pj::ToneDesc tone_desc;
-        tone_desc.freq1 = 480;
-        tone_desc.freq2 = 440;
-        tone_desc.on_msec = 2000;
-        tone_desc.off_msec = 4000;
-        tg.play(pj::ToneDescVector{tone_desc}, true);
-        active_call = account->make_call();
-        pj::CallOpParam prm;
-        active_call->makeCall(number_to_dial, {});
-        state = State::WaitingForAnswer;
-      } else {
-        state = State::WaitingForNumber;
-      }
+
+      break;
+    }
+    case State::Dialing: {
+      tg.stop();
+      pj::ToneDesc tone_desc;
+      tone_desc.freq1 = 480;
+      tone_desc.freq2 = 440;
+      tone_desc.on_msec = 2000;
+      tone_desc.off_msec = 4000;
+      tg.play(pj::ToneDescVector{tone_desc}, true);
+      active_call = account->make_call();
+      std::stringstream ss;
+      ss << "sip:" << number_to_dial << "@" << server_address;
+      number_to_dial = ss.str();
+      active_call->makeCall(number_to_dial, {});
+      state = State::WaitingForAnswer;
       break;
     }
     case State::WaitingForAnswer: {
       auto event = dialer.wait_for_event(std::nullopt);
       if (event.event == Dialer::Event::OnHook) {
         tg.stop();
-        state = State::OnHook;
+        state = State::Hangup;
         continue;
       }
 
@@ -290,11 +302,11 @@ int main(int argc, char **argv) {
       }
 
       tg.stop();
-      auto ci = active_call->getInfo();
+      auto ci = active_call->get_state();
       if (ci.state == PJSIP_INV_STATE_CONFIRMED) {
         state = State::InCall;
       } else {
-        state = State::OnHook;
+        state = State::Hangup;
       }
       break;
     }
@@ -303,7 +315,7 @@ int main(int argc, char **argv) {
 
       auto event = dialer.wait_for_event(std::nullopt);
       if (event.event == Dialer::Event::OnHook) {
-        state = State::OnHook;
+        state = State::Hangup;
       }
       if (event.event == Dialer::Event::ButtonDown) {
         push_digit(event.button);
