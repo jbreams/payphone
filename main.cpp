@@ -127,6 +127,7 @@ enum State {
   WaitingForNumber,
   Dialing,
   WaitingForAnswer,
+  StartCall,
   InCall,
   Hangup,
   CallError
@@ -246,17 +247,19 @@ int main(int argc, char **argv) {
         continue;
       }
       state = State::DialTone;
+      break;
+    }
+    case State::DialTone: {
       pj::ToneDesc tone_desc;
       tone_desc.freq1 = 350;
       tone_desc.freq2 = 440;
       tone_desc.on_msec = std::numeric_limits<short>::max();
       tg.play(pj::ToneDescVector{tone_desc}, true);
       number_to_dial.clear();
-      break;
-    }
-    case State::WaitingForNumber:
+      state = State::WaitingForNumber;
       [[fallthrough]];
-    case State::DialTone: {
+    }
+    case State::WaitingForNumber: {
       auto event = dialer.wait_for_event(std::chrono::seconds{3});
       if (event.event == Dialer::Event::OnHook) {
         state = State::Hangup;
@@ -292,7 +295,6 @@ int main(int argc, char **argv) {
     case State::WaitingForAnswer: {
       auto event = dialer.wait_for_event(std::nullopt);
       if (event.event == Dialer::Event::OnHook) {
-        tg.stop();
         state = State::Hangup;
         continue;
       }
@@ -301,18 +303,18 @@ int main(int argc, char **argv) {
         continue;
       }
 
-      tg.stop();
       auto ci = active_call->get_state();
       if (ci.state == PJSIP_INV_STATE_CONFIRMED) {
-        state = State::InCall;
+        state = State::StartCall;
       } else {
         state = State::Hangup;
       }
       break;
     }
-    case State::InCall: {
+    case State::StartCall:
       tg.stop();
-
+      [[fallthrough]];
+    case State::InCall: {
       auto event = dialer.wait_for_event(std::nullopt);
       if (event.event == Dialer::Event::OnHook) {
         state = State::Hangup;
