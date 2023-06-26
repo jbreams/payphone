@@ -158,16 +158,6 @@ private:
   void line_config_to_ioctl(const LineConfig &in, gpio_v2_line_config *out);
 
   template <typename... Args> int do_ioctl(int ctl, Args... args);
-#if 0 
-  {
-    int rc = ::ioctl(m_fd, ctl, args...);
-    if (rc == -1) {
-      int err = errno;
-      throw std::system_error(err, std::system_category());
-    }
-    return rc;
-  }
-#endif
 
   GpioFdHolder m_fd;
   std::string m_name;
