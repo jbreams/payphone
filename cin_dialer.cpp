@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 
+#include <sys/select.h>
 #include <unistd.h>
 
 CinDialer::CinDialer() { ::pipe(m_interrupt_pipe); }
